@@ -1,90 +1,127 @@
 # 행동 로직 시스템
 
-> **문서 목적**: StateTree, Signal, Smart Objects를 활용한 몬스터 행동 구현 방법 이해
+> **문서 목적**: StateTree, Signal, Processor를 활용한 몬스터 행동 구현 방법 이해
+>
+> **대상 독자**: 블루프린트 개발자부터 C++ 개발자까지
 
 ---
 
-## 1. 행동 로직 아키텍처 개요
+## 1. 몬스터 행동, 어떻게 만들어야 하나요?
 
-Mass AI에서 행동 로직을 구현하는 방법은 여러 가지입니다:
+### 전통적인 AI vs Mass AI
 
+**블루프린트 AI (Actor 기반)**:
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     행동 로직 계층                               │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  ┌─────────────────┐                                            │
-│  │   StateTree     │  ← 복잡한 상태 기반 행동 (High LOD)        │
-│  │   (선택적)      │                                            │
-│  └────────┬────────┘                                            │
-│           │                                                      │
-│  ┌────────▼────────┐                                            │
-│  │   Signal        │  ← 이벤트 기반 통신 (모든 LOD)             │
-│  │   System        │                                            │
-│  └────────┬────────┘                                            │
-│           │                                                      │
-│  ┌────────▼────────┐                                            │
-│  │   Processor     │  ← 기본 행동 로직 (모든 LOD)               │
-│  │   (직접 구현)   │                                            │
-│  └─────────────────┘                                            │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+BP_Monster에서:
+- Behavior Tree 사용
+- AI Controller 연결
+- Blackboard로 상태 관리
+- BTTask로 행동 정의
+
+결과: 몬스터 100마리 이상이면 성능 문제!
 ```
+
+**Mass AI**:
+```
+몬스터 수천 마리를 위한 세 가지 선택지:
+
+1. Processor 직접 구현 (가장 효율적)
+   → 간단한 행동에 적합
+
+2. Signal 시스템 (이벤트 기반)
+   → 피격, 죽음 등 이벤트 처리
+
+3. StateTree (상태 기반)
+   → 복잡한 행동에 적합, High LOD에서만 사용
+```
+
+### 세 가지 방법 비교
+
+| 방법 | 복잡도 | 성능 | 용도 |
+|------|--------|------|------|
+| **Processor** | 간단 | 최고 | 추적, 공격 등 단순 행동 |
+| **Signal** | 중간 | 높음 | 이벤트 반응 (피격, 죽음) |
+| **StateTree** | 복잡 | 중간 | 복잡한 상태 전환 (High LOD만) |
 
 ---
 
-## 2. Processor 기반 단순 행동
+## 2. Processor로 간단한 행동 만들기
 
-### 플레이어 추적 Processor
+### "플레이어 쫓아가기" 만들기
 
-가장 기본적인 행동: 플레이어를 향해 이동
+가장 기본적인 몬스터 행동이에요. Processor 하나로 구현할 수 있어요.
 
+**전체 흐름**:
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     플레이어 추적 Processor                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  1. 플레이어 위치 가져오기                                          │
+│        │                                                             │
+│        ▼                                                             │
+│  2. 각 몬스터에서 플레이어까지 방향 계산                            │
+│        │                                                             │
+│        ▼                                                             │
+│  3. 그 방향으로 속도 설정                                           │
+│        │                                                             │
+│        ▼                                                             │
+│  4. 이동 Processor가 실제 이동 처리                                 │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+**코드로 구현**:
 ```cpp
 UCLASS()
-class UMonsterChasePlayerProcessor : public UMassProcessor
+class UMonsterChaseProcessor : public UMassProcessor
 {
     GENERATED_BODY()
 
 public:
-    UMonsterChasePlayerProcessor()
+    UPROPERTY(EditAnywhere)
+    float ChaseSpeed = 400.0f;  // 이동 속도 (cm/s)
+
+    // 생성자: 언제 실행할지 설정
+    UMonsterChaseProcessor()
     {
         ProcessingPhase = EMassProcessingPhase::PrePhysics;
-        // 이동 적용 전에 실행
+
+        // 이동 적용 Processor보다 먼저 실행
         ExecutionOrder.ExecuteBefore.Add(UMassApplyMovementProcessor::StaticClass());
     }
 
+    // 어떤 엔티티를 처리할지 설정
     virtual void ConfigureQueries() override
     {
         EntityQuery.AddRequirement<FTransformFragment>(EMassFragmentAccess::ReadOnly);
-        EntityQuery.AddRequirement<FMassDesiredMovementFragment>(EMassFragmentAccess::ReadWrite);
+        EntityQuery.AddRequirement<FMassVelocityFragment>(EMassFragmentAccess::ReadWrite);
         EntityQuery.AddRequirement<FMonsterTag>(EMassFragmentPresence::All);
-
-        // 죽은 몬스터 제외
-        EntityQuery.AddRequirement<FDeadTag>(EMassFragmentPresence::None);
+        EntityQuery.AddRequirement<FDeadTag>(EMassFragmentPresence::None);  // 죽은 건 제외
     }
 
+    // 매 프레임 실행
     virtual void Execute(FMassEntityManager& EntityManager,
                          FMassExecutionContext& Context) override
     {
-        // 플레이어 위치 캐싱
-        FVector PlayerLocation = GetPlayerLocation();
+        // 1. 플레이어 위치 가져오기
+        const FVector PlayerLocation = GetPlayerLocation();
 
+        // 2. 모든 몬스터 처리
         EntityQuery.ForEachEntityChunk(EntityManager, Context,
-            [PlayerLocation](FMassExecutionContext& Context)
+            [this, PlayerLocation](FMassExecutionContext& Context)
             {
                 auto Transforms = Context.GetFragmentView<FTransformFragment>();
-                auto Movements = Context.GetMutableFragmentView<FMassDesiredMovementFragment>();
+                auto Velocities = Context.GetMutableFragmentView<FMassVelocityFragment>();
 
-                const int32 NumEntities = Context.GetNumEntities();
-                for (int32 i = 0; i < NumEntities; ++i)
+                for (int32 i = 0; i < Context.GetNumEntities(); ++i)
                 {
-                    // 플레이어 방향 계산
+                    // 3. 플레이어 방향 계산
                     FVector MyLocation = Transforms[i].Transform.GetLocation();
                     FVector Direction = (PlayerLocation - MyLocation).GetSafeNormal();
 
-                    // 원하는 속도 설정 (이동 Processor가 적용)
-                    Movements[i].DesiredVelocity = Direction * 400.0f;  // 400 cm/s
-                    Movements[i].DesiredFacing = Direction.Rotation();
+                    // 4. 속도 설정
+                    Velocities[i].Value = Direction * ChaseSpeed;
                 }
             });
     }
@@ -92,20 +129,16 @@ public:
 private:
     FVector GetPlayerLocation() const
     {
-        // 플레이어 위치 가져오기 (캐싱 권장)
-        if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+        if (APawn* Player = UGameplayStatics::GetPlayerPawn(GetWorld(), 0))
         {
-            if (APawn* Pawn = PC->GetPawn())
-            {
-                return Pawn->GetActorLocation();
-            }
+            return Player->GetActorLocation();
         }
         return FVector::ZeroVector;
     }
 };
 ```
 
-### 범위 기반 공격 Processor
+### "가까우면 공격하기" 추가
 
 ```cpp
 UCLASS()
@@ -115,51 +148,52 @@ class UMonsterAttackProcessor : public UMassProcessor
 
 public:
     UPROPERTY(EditAnywhere)
-    float AttackRange = 100.0f;
+    float AttackRange = 100.0f;   // 공격 범위 (cm)
 
     UPROPERTY(EditAnywhere)
-    float AttackCooldown = 1.0f;
+    float AttackCooldown = 1.0f;  // 공격 쿨다운 (초)
 
-    virtual void ConfigureQueries() override
-    {
-        EntityQuery.AddRequirement<FTransformFragment>(EMassFragmentAccess::ReadOnly);
-        EntityQuery.AddRequirement<FMonsterCombatFragment>(EMassFragmentAccess::ReadWrite);
-        EntityQuery.AddRequirement<FMonsterTag>(EMassFragmentPresence::All);
-        EntityQuery.AddRequirement<FDeadTag>(EMassFragmentPresence::None);
-    }
+    UPROPERTY(EditAnywhere)
+    float Damage = 10.0f;
 
     virtual void Execute(FMassEntityManager& EntityManager,
                          FMassExecutionContext& Context) override
     {
-        FVector PlayerLocation = GetPlayerLocation();
-        float AttackRangeSq = FMath::Square(AttackRange);
-        float DeltaTime = Context.GetDeltaTimeSeconds();
+        const FVector PlayerLocation = GetPlayerLocation();
+        const float AttackRangeSq = FMath::Square(AttackRange);  // 제곱으로 비교 (더 빠름)
+        const float DeltaTime = Context.GetDeltaTimeSeconds();
 
         EntityQuery.ForEachEntityChunk(EntityManager, Context,
             [=](FMassExecutionContext& Context)
             {
                 auto Transforms = Context.GetFragmentView<FTransformFragment>();
                 auto Combats = Context.GetMutableFragmentView<FMonsterCombatFragment>();
+                auto Velocities = Context.GetMutableFragmentView<FMassVelocityFragment>();
 
                 for (int32 i = 0; i < Context.GetNumEntities(); ++i)
                 {
                     // 쿨다운 감소
-                    Combats[i].AttackCooldownRemaining -= DeltaTime;
+                    Combats[i].CooldownRemaining -= DeltaTime;
 
-                    // 거리 체크
+                    // 거리 계산
                     float DistSq = FVector::DistSquared(
                         Transforms[i].Transform.GetLocation(),
                         PlayerLocation);
 
-                    if (DistSq <= AttackRangeSq &&
-                        Combats[i].AttackCooldownRemaining <= 0.0f)
+                    if (DistSq <= AttackRangeSq)
                     {
-                        // 공격 실행
-                        Combats[i].bIsAttacking = true;
-                        Combats[i].AttackCooldownRemaining = AttackCooldown;
+                        // 공격 범위 안! 멈추기
+                        Velocities[i].Value = FVector::ZeroVector;
 
-                        // 데미지 적용 (Signal로 전달 가능)
-                        // ...
+                        // 쿨다운 끝났으면 공격
+                        if (Combats[i].CooldownRemaining <= 0.0f)
+                        {
+                            Combats[i].bIsAttacking = true;
+                            Combats[i].CooldownRemaining = AttackCooldown;
+
+                            // 여기서 플레이어에게 데미지!
+                            // (Signal이나 직접 호출로 처리)
+                        }
                     }
                     else
                     {
@@ -171,176 +205,332 @@ public:
 };
 ```
 
-### 전투 Fragment
-
-```cpp
-USTRUCT()
-struct FMonsterCombatFragment : public FMassFragment
-{
-    GENERATED_BODY()
-
-    UPROPERTY()
-    float AttackDamage = 10.0f;
-
-    UPROPERTY()
-    float AttackCooldownRemaining = 0.0f;
-
-    UPROPERTY()
-    bool bIsAttacking = false;
-
-    UPROPERTY()
-    FMassEntityHandle CurrentTarget;
-};
-```
-
 ---
 
-## 3. Signal 시스템
+## 3. Signal 시스템 - 이벤트 통신
 
-Signal은 Mass 엔티티 간의 **이벤트 통신** 메커니즘입니다.
+### Signal이 뭐예요?
 
-### 소스 위치
+**쉬운 설명**: Mass Entity끼리 "야 이거 알아!"라고 알려주는 시스템이에요.
+
+**블루프린트 비유**: Event Dispatcher 같은 거예요. 누군가 이벤트를 발생시키면, 구독한 쪽에서 반응해요.
+
 ```
-C:\Program Files\Epic Games\UE_5.7.1\UE_5.7\Engine\Plugins\Runtime\MassGameplay\Source\MassSignals\Public\
-```
-
-### Signal Subsystem
-
-```cpp
-// MassSignalSubsystem.h
-UCLASS()
-class UMassSignalSubsystem : public UWorldSubsystem
-{
-    GENERATED_BODY()
-
-public:
-    // 단일 엔티티에 신호 전송
-    void SignalEntity(FName SignalName, FMassEntityHandle Entity);
-
-    // 여러 엔티티에 신호 전송
-    void SignalEntities(FName SignalName, TArrayView<FMassEntityHandle> Entities);
-
-    // 지연 신호 전송
-    void DelaySignalEntity(FName SignalName, FMassEntityHandle Entity, float Delay);
-
-    // Command Buffer를 통한 지연 신호
-    void SignalEntityDeferred(FName SignalName, FMassEntityHandle Entity,
-                              FMassCommandBuffer& CommandBuffer);
-};
+블루프린트                     Mass AI Signal
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Event Dispatcher      →       Signal 전송
+Bind Event            →       Signal 구독 (Processor에서)
+Event 호출             →       SignalEntity() 호출
 ```
 
-### Signal Processor 기본 클래스
+### Signal 사용 예시: 몬스터 피격
 
-```cpp
-// Signal에 반응하는 Processor
-UCLASS()
-class UMassSignalProcessorBase : public UMassProcessor
-{
-    GENERATED_BODY()
-
-public:
-    // 수신할 신호 등록
-    void SubscribeToSignal(FName SignalName);
-
-    // 신호 수신 시 호출 (오버라이드)
-    virtual void SignalEntities(FMassEntityManager& EntityManager,
-                                FMassExecutionContext& Context,
-                                FMassSignalNameLookup& EntitySignals) PURE_VIRTUAL;
-};
-```
-
-### Signal 사용 예시
-
-**1. 신호 정의**
+**Step 1: Signal 이름 정의**
 ```cpp
 // MonsterSignals.h
 namespace MonsterSignals
 {
-    const FName PlayerDetected = TEXT("PlayerDetected");
-    const FName PlayerLost = TEXT("PlayerLost");
-    const FName TakeDamage = TEXT("TakeDamage");
-    const FName Death = TEXT("Death");
-    const FName AttackHit = TEXT("AttackHit");
+    const FName Hit = TEXT("MonsterHit");           // 피격
+    const FName Death = TEXT("MonsterDeath");       // 사망
+    const FName PlayerDetected = TEXT("Detected");  // 플레이어 감지
 }
 ```
 
-**2. 신호 전송**
+**Step 2: Signal 보내기**
 ```cpp
-// 플레이어 감지 시 신호 전송
-void UDetectionProcessor::Execute(...)
+void UDamageProcessor::ApplyDamage(FMassEntityHandle Monster, float Damage)
 {
+    // Signal Subsystem 가져오기
     UMassSignalSubsystem* SignalSubsystem =
         GetWorld()->GetSubsystem<UMassSignalSubsystem>();
 
-    EntityQuery.ForEachEntityChunk(...,
-        [SignalSubsystem](FMassExecutionContext& Context)
-        {
-            for (int32 i = 0; i < Context.GetNumEntities(); ++i)
-            {
-                if (DetectedPlayer(i))
-                {
-                    // 신호 전송
-                    SignalSubsystem->SignalEntity(
-                        MonsterSignals::PlayerDetected,
-                        Context.GetEntity(i));
-                }
-            }
-        });
+    // 피격 Signal 전송!
+    SignalSubsystem->SignalEntity(MonsterSignals::Hit, Monster);
+
+    // 체력 확인
+    FMonsterHealthFragment* Health =
+        EntityManager.GetFragmentDataPtr<FMonsterHealthFragment>(Monster);
+
+    if (Health->CurrentHealth <= 0)
+    {
+        // 죽음 Signal 전송!
+        SignalSubsystem->SignalEntity(MonsterSignals::Death, Monster);
+    }
 }
 ```
 
-**3. 신호 수신**
+**Step 3: Signal 받기**
 ```cpp
 UCLASS()
-class UMonsterAlertProcessor : public UMassSignalProcessorBase
+class UMonsterHitReactionProcessor : public UMassSignalProcessorBase
 {
     GENERATED_BODY()
 
 public:
-    UMonsterAlertProcessor()
+    UMonsterHitReactionProcessor()
     {
-        // 수신할 신호 등록
-        SubscribeToSignal(MonsterSignals::PlayerDetected);
-        SubscribeToSignal(MonsterSignals::TakeDamage);
+        // 이 Signal을 받겠다고 등록
+        SubscribeToSignal(MonsterSignals::Hit);
     }
 
+    // Signal을 받으면 이 함수가 호출됨
     virtual void SignalEntities(FMassEntityManager& EntityManager,
                                 FMassExecutionContext& Context,
                                 FMassSignalNameLookup& EntitySignals) override
     {
-        // PlayerDetected 신호를 받은 엔티티 처리
-        TArray<FMassEntityHandle> DetectedEntities;
-        EntitySignals.GetEntitiesForSignal(MonsterSignals::PlayerDetected,
-                                            DetectedEntities);
+        // Hit Signal을 받은 엔티티들 가져오기
+        TArray<FMassEntityHandle> HitMonsters;
+        EntitySignals.GetEntitiesForSignal(MonsterSignals::Hit, HitMonsters);
 
-        for (FMassEntityHandle Entity : DetectedEntities)
+        for (FMassEntityHandle Monster : HitMonsters)
         {
-            // 경계 상태로 전환
-            if (FMonsterStateFragment* State =
-                EntityManager.GetFragmentDataPtr<FMonsterStateFragment>(Entity))
+            // 피격 반응 처리
+            FMonsterAnimStateFragment* AnimState =
+                EntityManager.GetFragmentDataPtr<FMonsterAnimStateFragment>(Monster);
+
+            if (AnimState)
             {
-                State->CurrentState = EMonsterState::Alert;
+                AnimState->bIsHit = true;  // AnimBP에서 Hit 애니메이션 재생
             }
         }
     }
 };
 ```
 
+### Signal 사용 시나리오
+
+| Signal | 언제 보내나요? | 어디서 받나요? |
+|--------|---------------|---------------|
+| `MonsterHit` | 플레이어 공격이 몬스터에 맞을 때 | 피격 반응 Processor |
+| `MonsterDeath` | 몬스터 체력이 0이 될 때 | 죽음 처리 Processor |
+| `PlayerHit` | 몬스터 공격이 플레이어에 맞을 때 | UI/사운드 Processor |
+| `ItemDrop` | 몬스터 사망 시 | 아이템 스폰 Processor |
+
 ---
 
-## 4. StateTree 통합
+## 4. StateTree 완전 가이드
 
-StateTree는 **복잡한 상태 기반 행동**을 위한 비주얼 스크립팅 시스템입니다.
+### StateTree가 뭐예요?
 
-### 소스 위치
+**쉬운 설명**: "시각적으로 AI 상태 기계를 만드는 도구"
+
+Behavior Tree를 써봤다면 비슷해요. 하지만 더 유연하고, Mass AI와 잘 통합돼요.
+
 ```
-C:\Program Files\Epic Games\UE_5.7.1\UE_5.7\Engine\Plugins\Runtime\GameplayStateTree\Source\GameplayStateTreeModule\Public\
+┌─────────────────────────────────────────────────────────────────────┐
+│                        StateTree 기본 개념                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  State (상태)                                                        │
+│  └─ "현재 뭘 하고 있나요?" (예: Idle, Chase, Attack)                │
+│                                                                      │
+│  Task (작업)                                                         │
+│  └─ "그 상태에서 뭘 하나요?" (예: 이동, 공격, 대기)                 │
+│                                                                      │
+│  Condition (조건)                                                    │
+│  └─ "언제 다른 상태로 바꾸나요?" (예: 플레이어가 가까우면)          │
+│                                                                      │
+│  Transition (전환)                                                   │
+│  └─ "어떤 상태로 바꾸나요?" (예: Idle → Chase)                      │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### StateTree AI Component
+### StateTree는 언제 쓰나요?
+
+**StateTree가 적합한 경우**:
+- 복잡한 행동 패턴 (보스 몬스터)
+- 여러 상태 전환이 필요할 때
+- 블루프린트로 행동을 정의하고 싶을 때
+- High LOD Actor에서만 사용
+
+**StateTree가 불필요한 경우**:
+- 단순 추적/공격 (Processor로 충분)
+- 수천 마리 전부에게 적용 (성능 문제)
+
+### StateTree 만들기 - 단계별
+
+**Step 1: StateTree 에셋 생성**
+
+1. Content Browser에서 **우클릭**
+2. **Artificial Intelligence → StateTree**
+3. 이름 지정: `ST_Monster_Behavior`
+
+**Step 2: Schema 설정**
+
+StateTree 에디터에서:
+1. **Details** 패널
+2. **Schema** → `StateTreeAIComponentSchema` 또는 `MassStateTreeSchema`
+
+```
+Schema 종류:
+- StateTreeAIComponentSchema: Actor 기반 AI용
+- MassStateTreeSchema: Mass Entity 전용
+```
+
+**Step 3: 상태(State) 추가**
+
+에디터에서:
+1. 루트 상태 우클릭 → **Add State**
+2. 상태 이름 지정: `Idle`, `Chase`, `Attack`
+
+```
+[Root]
+├── [Idle]      ← 기본 상태
+├── [Chase]     ← 추적 상태
+└── [Attack]    ← 공격 상태
+```
+
+**Step 4: Task 추가**
+
+각 상태에 Task 추가:
+1. 상태 선택
+2. **Tasks** 섹션에서 **+** 클릭
+3. Task 선택 (내장 또는 커스텀)
+
+```
+[Chase]
+└── Tasks
+    └── [Move To Task]
+        ├─ Target: Player Location
+        └─ Acceptable Radius: 100
+```
+
+**Step 5: Transition 설정**
+
+상태 전환 조건 추가:
+1. 상태 선택
+2. **Transitions** 섹션에서 **+** 클릭
+3. 조건과 목표 상태 설정
+
+```
+[Idle] ─── (Distance < 1000) ───→ [Chase]
+[Chase] ─── (Distance < 100) ───→ [Attack]
+[Attack] ─── (Attack Done) ───→ [Chase]
+[Chase] ─── (Distance > 1500) ───→ [Idle]
+```
+
+### 블루프린트로 StateTree Task 만들기
+
+**방법 1: Blueprint에서 Task 생성**
+
+1. Content Browser → **Blueprint Class**
+2. 부모 클래스: `StateTreeTaskBlueprintBase`
+3. 함수 오버라이드:
+   - `Enter State`: 상태 진입 시
+   - `Tick`: 매 프레임
+   - `Exit State`: 상태 종료 시
+
+**Task Blueprint 예시**:
+```
+Event Enter State
+    │
+    ▼
+[Play Animation Montage: Attack]
+    │
+    ▼
+[Return: Running]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Event Tick
+    │
+    ▼
+[Is Montage Playing?]
+    │
+    ├─ Yes → [Return: Running]
+    │
+    └─ No → [Apply Damage]
+             │
+             ▼
+         [Return: Succeeded]
+```
+
+**방법 2: C++로 Task 생성**
 
 ```cpp
-// High LOD Actor에서 StateTree 사용
+USTRUCT()
+struct FMonsterAttackTask : public FStateTreeTaskCommonBase
+{
+    GENERATED_BODY()
+
+    UPROPERTY(EditAnywhere)
+    float Damage = 10.0f;
+
+    UPROPERTY(EditAnywhere)
+    TObjectPtr<UAnimMontage> AttackMontage;
+
+    // 상태 진입 시
+    virtual EStateTreeRunStatus EnterState(
+        FStateTreeExecutionContext& Context,
+        const FStateTreeTransitionResult& Transition) const override
+    {
+        // 공격 애니메이션 재생
+        AActor* Actor = Context.GetOwner();
+        if (USkeletalMeshComponent* Mesh = Actor->FindComponentByClass<USkeletalMeshComponent>())
+        {
+            if (UAnimInstance* Anim = Mesh->GetAnimInstance())
+            {
+                Anim->Montage_Play(AttackMontage);
+            }
+        }
+        return EStateTreeRunStatus::Running;
+    }
+
+    // 매 프레임
+    virtual EStateTreeRunStatus Tick(
+        FStateTreeExecutionContext& Context,
+        const float DeltaTime) const override
+    {
+        AActor* Actor = Context.GetOwner();
+        if (USkeletalMeshComponent* Mesh = Actor->FindComponentByClass<USkeletalMeshComponent>())
+        {
+            if (UAnimInstance* Anim = Mesh->GetAnimInstance())
+            {
+                // 몽타주 끝났으면 성공
+                if (!Anim->Montage_IsPlaying(AttackMontage))
+                {
+                    return EStateTreeRunStatus::Succeeded;
+                }
+            }
+        }
+        return EStateTreeRunStatus::Running;
+    }
+};
+```
+
+### Mass AI와 StateTree 통합
+
+**MassStateTreeTrait 사용**:
+
+```cpp
+// Entity Config에 MassStateTreeTrait 추가
+UCLASS()
+class UMonsterStateTreeTrait : public UMassStateTreeTrait
+{
+    GENERATED_BODY()
+
+public:
+    UPROPERTY(EditAnywhere)
+    UStateTree* MonsterStateTree;  // StateTree 에셋
+
+    virtual void BuildTemplate(FMassEntityTemplateBuildContext& BuildContext,
+                               const UWorld& World) const override
+    {
+        Super::BuildTemplate(BuildContext, World);
+
+        // StateTree Fragment 추가
+        FMassStateTreeFragment& StateTreeFragment =
+            BuildContext.AddFragment_GetRef<FMassStateTreeFragment>();
+
+        StateTreeFragment.StateTree = MonsterStateTree;
+    }
+};
+```
+
+**High LOD Actor에서 StateTree 사용**:
+
+```cpp
 UCLASS()
 class ABP_Monster_HighRes : public AActor
 {
@@ -349,345 +539,148 @@ class ABP_Monster_HighRes : public AActor
 public:
     ABP_Monster_HighRes()
     {
-        // StateTree AI 컴포넌트 추가
+        // StateTree AI Component
         StateTreeComponent = CreateDefaultSubobject<UStateTreeAIComponent>(TEXT("StateTree"));
 
-        // Mass Agent 컴포넌트
+        // Mass Agent
         MassAgent = CreateDefaultSubobject<UMassAgentComponent>(TEXT("MassAgent"));
+    }
+
+    virtual void BeginPlay() override
+    {
+        Super::BeginPlay();
+
+        // StateTree 시작
+        if (StateTreeComponent && MonsterStateTree)
+        {
+            StateTreeComponent->SetStateTree(MonsterStateTree);
+            StateTreeComponent->StartLogic();
+        }
     }
 
     UPROPERTY(VisibleAnywhere)
     UStateTreeAIComponent* StateTreeComponent;
 
-    UPROPERTY(VisibleAnywhere)
-    UMassAgentComponent* MassAgent;
+    UPROPERTY(EditAnywhere)
+    UStateTree* MonsterStateTree;
 };
 ```
 
-### StateTree 에셋 생성
+---
 
-에디터에서:
-1. Content Browser → 우클릭 → AI → StateTree
-2. StateTree 에디터에서 상태 및 전환 정의
+## 5. 몬스터 행동 StateTree 예시
 
-### StateTree 기본 구조
+### 간단한 몬스터 AI: Idle → Chase → Attack
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        StateTree Asset                           │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Root State                                                      │
-│  ├── Idle State                                                  │
-│  │   ├── Enter: PlayIdleAnimation                                │
-│  │   ├── Tick: CheckPlayerDistance                               │
-│  │   └── Transition: PlayerNear → Chase                          │
-│  │                                                               │
-│  ├── Chase State                                                 │
-│  │   ├── Enter: PlayRunAnimation                                 │
-│  │   ├── Task: MoveToTarget (FStateTreeMoveToTask)              │
-│  │   ├── Transition: InRange → Attack                            │
-│  │   └── Transition: PlayerFar → Idle                            │
-│  │                                                               │
-│  └── Attack State                                                │
-│      ├── Enter: PlayAttackAnimation                              │
-│      ├── Task: DealDamage                                        │
-│      └── Transition: AttackDone → Chase                          │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Monster StateTree 구조                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  [Root State]                                                        │
+│  │                                                                   │
+│  ├── [Idle State]                                                    │
+│  │   ├── Enter: PlayIdleAnimation                                   │
+│  │   ├── Task: WaitTask (계속 대기)                                 │
+│  │   └── Transition:                                                 │
+│  │       └── IF (PlayerDistance < 1500) → GOTO [Chase]              │
+│  │                                                                   │
+│  ├── [Chase State]                                                   │
+│  │   ├── Enter: PlayRunAnimation                                    │
+│  │   ├── Task: MoveToPlayerTask                                     │
+│  │   └── Transitions:                                                │
+│  │       ├── IF (PlayerDistance < 150) → GOTO [Attack]              │
+│  │       └── IF (PlayerDistance > 2000) → GOTO [Idle]               │
+│  │                                                                   │
+│  └── [Attack State]                                                  │
+│      ├── Enter: PlayAttackMontage                                   │
+│      ├── Task: WaitForMontageEnd                                    │
+│      ├── Task: ApplyDamageToPlayer                                  │
+│      └── Transition:                                                 │
+│          └── ON (TaskSucceeded) → GOTO [Chase]                      │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### StateTree Task 예시
+### Condition 만들기: 플레이어 거리
 
+**Blueprint Condition**:
+```
+[Evaluator: Get Player Distance]
+    │
+    ▼
+[Get Player Pawn] → [Get Actor Location]
+    │
+    ▼
+[Get Owner] → [Get Actor Location]
+    │
+    ▼
+[Vector Distance] → [Return: Distance Float]
+```
+
+**C++ Condition**:
 ```cpp
-// 이동 Task (내장)
-// GameplayStateTree/Tasks/StateTreeMoveToTask.h
 USTRUCT()
-struct FStateTreeMoveToTask : public FStateTreeAIActionTaskBase
+struct FPlayerDistanceCondition : public FStateTreeConditionCommonBase
 {
     GENERATED_BODY()
 
-    // 목표 위치
-    UPROPERTY(EditAnywhere, Category = "Parameter")
-    FVector TargetLocation;
+    UPROPERTY(EditAnywhere)
+    float DistanceThreshold = 1000.0f;
 
-    // 허용 반경
-    UPROPERTY(EditAnywhere, Category = "Parameter")
-    float AcceptableRadius = 50.0f;
+    UPROPERTY(EditAnywhere)
+    bool bLessThan = true;  // true: 더 가까우면, false: 더 멀면
 
-    // 부분 경로 허용
-    UPROPERTY(EditAnywhere, Category = "Parameter")
-    bool bAllowPartialPath = true;
-};
-```
-
-### 커스텀 StateTree Task
-
-```cpp
-// 공격 Task
-USTRUCT()
-struct FMonsterAttackTask : public FStateTreeAIActionTaskBase
-{
-    GENERATED_BODY()
-
-    UPROPERTY(EditAnywhere, Category = "Parameter")
-    float Damage = 10.0f;
-
-    UPROPERTY(EditAnywhere, Category = "Parameter")
-    UAnimMontage* AttackMontage;
-
-    virtual EStateTreeRunStatus EnterState(
-        FStateTreeExecutionContext& Context,
-        const FStateTreeTransitionResult& Transition) const override
+    virtual bool TestCondition(FStateTreeExecutionContext& Context) const override
     {
-        // 공격 애니메이션 재생
-        if (AActor* Actor = GetActor(Context))
-        {
-            if (USkeletalMeshComponent* Mesh =
-                Actor->FindComponentByClass<USkeletalMeshComponent>())
-            {
-                if (UAnimInstance* AnimInst = Mesh->GetAnimInstance())
-                {
-                    AnimInst->Montage_Play(AttackMontage);
-                }
-            }
-        }
-        return EStateTreeRunStatus::Running;
-    }
+        AActor* Owner = Context.GetOwner();
+        APawn* Player = UGameplayStatics::GetPlayerPawn(Owner->GetWorld(), 0);
 
-    virtual EStateTreeRunStatus Tick(
-        FStateTreeExecutionContext& Context,
-        const float DeltaTime) const override
-    {
-        // 몽타주 완료 체크
-        if (AActor* Actor = GetActor(Context))
-        {
-            if (USkeletalMeshComponent* Mesh =
-                Actor->FindComponentByClass<USkeletalMeshComponent>())
-            {
-                if (UAnimInstance* AnimInst = Mesh->GetAnimInstance())
-                {
-                    if (!AnimInst->Montage_IsPlaying(AttackMontage))
-                    {
-                        return EStateTreeRunStatus::Succeeded;
-                    }
-                }
-            }
-        }
-        return EStateTreeRunStatus::Running;
+        if (!Owner || !Player) return false;
+
+        float Distance = FVector::Dist(Owner->GetActorLocation(), Player->GetActorLocation());
+
+        return bLessThan ? (Distance < DistanceThreshold) : (Distance > DistanceThreshold);
     }
 };
 ```
 
 ---
 
-## 5. Smart Objects
+## 6. LOD별 행동 전략
 
-Smart Objects는 **환경과의 상호작용**을 정의합니다.
+### 거리에 따라 다른 행동 복잡도
 
-### 소스 위치
 ```
-C:\Program Files\Epic Games\UE_5.7.1\UE_5.7\Engine\Plugins\Runtime\MassGameplay\Source\MassSmartObjects\Public\
-```
-
-### Smart Object Fragment
-
-```cpp
-// MassSmartObjectFragments.h
-USTRUCT()
-struct FMassSmartObjectUserFragment : public FMassFragment
-{
-    GENERATED_BODY()
-
-    // 현재 상호작용 핸들
-    FSmartObjectClaimHandle ClaimHandle;
-
-    // 상호작용 상태
-    EMassSmartObjectInteractionStatus Status = EMassSmartObjectInteractionStatus::None;
-
-    // 쿨다운
-    float InteractionCooldown = 0.0f;
-};
-```
-
-### Smart Object 사용
-
-```cpp
-// 몬스터가 Smart Object와 상호작용
-// 예: 특정 지점에서 대기, 순찰 포인트 등
-
-// 1. Smart Object User Trait 추가
-UCLASS()
-class UMonsterSmartObjectTrait : public UMassSmartObjectUserTrait
-{
-    // 필요한 행동 정의 설정
-};
-
-// 2. Smart Object Actor 배치 (레벨에)
-// - Patrol Point, Cover Position 등
-
-// 3. Processor에서 Smart Object 탐색 및 사용
-void UMonsterSmartObjectProcessor::Execute(...)
-{
-    // UMassSmartObjectCandidatesFinderProcessor가
-    // 자동으로 근처 Smart Object 탐색
-}
+┌─────────────────────────────────────────────────────────────────────┐
+│                      LOD별 행동 복잡도                               │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  [High LOD: 0~50m, ~100마리]                                        │
+│  └─ StateTree 사용 가능!                                            │
+│     ├─ 복잡한 상태 전환                                             │
+│     ├─ 애니메이션 몽타주                                            │
+│     └─ 개별 AI 판단                                                 │
+│                                                                      │
+│  [Medium LOD: 50~200m, ~500마리]                                    │
+│  └─ Processor 기반 단순 행동                                        │
+│     ├─ 추적 (방향 벡터만)                                           │
+│     ├─ 거리 기반 공격                                               │
+│     └─ 상태는 Fragment로 관리                                       │
+│                                                                      │
+│  [Low LOD: 200m+, 나머지]                                           │
+│  └─ 최소 행동만                                                     │
+│     ├─ 플레이어 방향 이동만                                         │
+│     └─ 복잡한 로직 없음                                             │
+│                                                                      │
+│  [Off LOD: 화면 밖]                                                 │
+│  └─ 행동 스킵                                                       │
+│     └─ 몇 프레임마다 한 번씩만 처리                                 │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
----
-
-## 6. 뱀파이어 서바이벌 스타일 행동 구현
-
-### 단순 추적 + 근접 공격 패턴
-
-```cpp
-// 간단한 뱀서 스타일 몬스터 Processor
-UCLASS()
-class USimpleSurvivorMonsterProcessor : public UMassProcessor
-{
-    GENERATED_BODY()
-
-public:
-    UPROPERTY(EditAnywhere)
-    float ChaseSpeed = 300.0f;
-
-    UPROPERTY(EditAnywhere)
-    float AttackRange = 80.0f;
-
-    UPROPERTY(EditAnywhere)
-    float AttackDamage = 5.0f;
-
-    UPROPERTY(EditAnywhere)
-    float AttackCooldown = 1.5f;
-
-    virtual void ConfigureQueries() override
-    {
-        EntityQuery.AddRequirement<FTransformFragment>(EMassFragmentAccess::ReadOnly);
-        EntityQuery.AddRequirement<FMassDesiredMovementFragment>(EMassFragmentAccess::ReadWrite);
-        EntityQuery.AddRequirement<FMonsterCombatFragment>(EMassFragmentAccess::ReadWrite);
-        EntityQuery.AddRequirement<FMonsterTag>(EMassFragmentPresence::All);
-        EntityQuery.AddRequirement<FDeadTag>(EMassFragmentPresence::None);
-    }
-
-    virtual void Execute(FMassEntityManager& EntityManager,
-                         FMassExecutionContext& Context) override
-    {
-        const FVector PlayerLocation = GetCachedPlayerLocation();
-        const float AttackRangeSq = FMath::Square(AttackRange);
-        const float DeltaTime = Context.GetDeltaTimeSeconds();
-
-        EntityQuery.ForEachEntityChunk(EntityManager, Context,
-            [=](FMassExecutionContext& Context)
-            {
-                auto Transforms = Context.GetFragmentView<FTransformFragment>();
-                auto Movements = Context.GetMutableFragmentView<FMassDesiredMovementFragment>();
-                auto Combats = Context.GetMutableFragmentView<FMonsterCombatFragment>();
-
-                for (int32 i = 0; i < Context.GetNumEntities(); ++i)
-                {
-                    const FVector MyLocation = Transforms[i].Transform.GetLocation();
-                    const FVector ToPlayer = PlayerLocation - MyLocation;
-                    const float DistSq = ToPlayer.SizeSquared();
-
-                    // 쿨다운 감소
-                    Combats[i].AttackCooldownRemaining =
-                        FMath::Max(0.0f, Combats[i].AttackCooldownRemaining - DeltaTime);
-
-                    if (DistSq <= AttackRangeSq)
-                    {
-                        // 공격 범위 내: 멈추고 공격
-                        Movements[i].DesiredVelocity = FVector::ZeroVector;
-
-                        if (Combats[i].AttackCooldownRemaining <= 0.0f)
-                        {
-                            Combats[i].bIsAttacking = true;
-                            Combats[i].AttackCooldownRemaining = AttackCooldown;
-                            // 데미지는 별도 시스템에서 처리
-                        }
-                    }
-                    else
-                    {
-                        // 추적
-                        const FVector Direction = ToPlayer.GetSafeNormal();
-                        Movements[i].DesiredVelocity = Direction * ChaseSpeed;
-                        Movements[i].DesiredFacing = Direction.Rotation();
-                        Combats[i].bIsAttacking = false;
-                    }
-                }
-            });
-    }
-};
-```
-
-### 군집 회피 (Separation)
-
-```cpp
-UCLASS()
-class UMonsterSeparationProcessor : public UMassProcessor
-{
-    GENERATED_BODY()
-
-public:
-    UPROPERTY(EditAnywhere)
-    float SeparationRadius = 100.0f;
-
-    UPROPERTY(EditAnywhere)
-    float SeparationStrength = 200.0f;
-
-    virtual void Execute(FMassEntityManager& EntityManager,
-                         FMassExecutionContext& Context) override
-    {
-        // 간단한 공간 해싱 또는 그리드 기반 이웃 탐색
-        // (실제로는 더 효율적인 알고리즘 필요)
-
-        TArray<FVector> AllPositions;
-        // 모든 몬스터 위치 수집...
-
-        EntityQuery.ForEachEntityChunk(EntityManager, Context,
-            [=, &AllPositions](FMassExecutionContext& Context)
-            {
-                auto Transforms = Context.GetFragmentView<FTransformFragment>();
-                auto Forces = Context.GetMutableFragmentView<FMassForceFragment>();
-
-                for (int32 i = 0; i < Context.GetNumEntities(); ++i)
-                {
-                    FVector SeparationForce = FVector::ZeroVector;
-                    FVector MyPos = Transforms[i].Transform.GetLocation();
-
-                    // 근처 몬스터와의 분리력 계산
-                    for (const FVector& OtherPos : AllPositions)
-                    {
-                        FVector Diff = MyPos - OtherPos;
-                        float Dist = Diff.Size();
-                        if (Dist > 0.0f && Dist < SeparationRadius)
-                        {
-                            // 거리에 반비례하는 밀어내기 힘
-                            SeparationForce += Diff.GetSafeNormal() *
-                                (1.0f - Dist / SeparationRadius) * SeparationStrength;
-                        }
-                    }
-
-                    Forces[i].Value += SeparationForce;
-                }
-            });
-    }
-};
-```
-
----
-
-## 7. LOD별 행동 복잡도
-
-### 행동 복잡도 전략
-
-| LOD | 행동 복잡도 | 구현 방법 |
-|-----|------------|-----------|
-| High | 풀 행동 | StateTree + AnimBP |
-| Medium | 단순 행동 | Processor 기반 |
-| Low | 최소 행동 | 추적만 |
-| Off | 로직 없음 | 틱 스킵 |
-
-### LOD 기반 Processor 분기
+### LOD 분기 Processor
 
 ```cpp
 UCLASS()
@@ -697,33 +690,124 @@ class UMonsterBehaviorProcessor : public UMassProcessor
                          FMassExecutionContext& Context) override
     {
         EntityQuery.ForEachEntityChunk(EntityManager, Context,
-            [](FMassExecutionContext& Context)
+            [this](FMassExecutionContext& Context)
             {
                 auto LODs = Context.GetFragmentView<FMassRepresentationLODFragment>();
-                auto Movements = Context.GetMutableFragmentView<FMassDesiredMovementFragment>();
 
                 for (int32 i = 0; i < Context.GetNumEntities(); ++i)
                 {
                     switch (LODs[i].LOD)
                     {
                         case EMassLOD::High:
-                            // High LOD: StateTree가 처리 (이 Processor에서 스킵)
+                            // StateTree가 처리 (여기서 스킵)
                             break;
 
                         case EMassLOD::Medium:
-                            // Medium LOD: 단순 추적 + 공격
-                            ProcessMediumLOD(i, Movements[i]);
+                            ProcessMediumLODBehavior(Context, i);
                             break;
 
                         case EMassLOD::Low:
-                            // Low LOD: 추적만
-                            ProcessLowLOD(i, Movements[i]);
+                            ProcessLowLODBehavior(Context, i);
                             break;
 
                         case EMassLOD::Off:
-                            // Off: 아무것도 안 함
+                            // 처리 안 함
                             break;
                     }
+                }
+            });
+    }
+
+    void ProcessMediumLODBehavior(FMassExecutionContext& Context, int32 Index)
+    {
+        // 단순 추적 + 공격 (상태 Fragment 사용)
+    }
+
+    void ProcessLowLODBehavior(FMassExecutionContext& Context, int32 Index)
+    {
+        // 플레이어 방향 이동만
+    }
+};
+```
+
+---
+
+## 7. 뱀파이어 서바이벌 스타일 행동
+
+### 전체 구조
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│              뱀파이어 서바이벌 몬스터 행동 아키텍처                    │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  [모든 LOD 공통 - Processor]                                        │
+│  ├─ ChaseProcessor: 플레이어 방향 이동                              │
+│  ├─ SeparationProcessor: 몬스터끼리 겹침 방지                       │
+│  └─ MovementApplyProcessor: 실제 이동 적용                          │
+│                                                                      │
+│  [High LOD만 - StateTree 또는 Processor]                            │
+│  ├─ AttackProcessor: 근접 공격 (범위 체크)                          │
+│  └─ StateTree: 복잡한 패턴 (선택적)                                 │
+│                                                                      │
+│  [이벤트 - Signal]                                                  │
+│  ├─ MonsterHit → 피격 애니메이션                                    │
+│  ├─ MonsterDeath → 사망 처리, 아이템 드랍                           │
+│  └─ PlayerHit → UI 업데이트, 사운드                                 │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 군집 분리 (Separation) - 겹침 방지
+
+몬스터들이 서로 겹치지 않게 하는 로직:
+
+```cpp
+UCLASS()
+class UMonsterSeparationProcessor : public UMassProcessor
+{
+public:
+    UPROPERTY(EditAnywhere)
+    float SeparationRadius = 80.0f;  // 다른 몬스터와 최소 거리
+
+    UPROPERTY(EditAnywhere)
+    float SeparationForce = 100.0f;  // 밀어내는 힘
+
+    virtual void Execute(...) override
+    {
+        // 1. 공간 해싱으로 근처 몬스터 빠르게 찾기
+        // 2. 가까운 몬스터 방향 반대로 힘 적용
+
+        EntityQuery.ForEachEntityChunk(EntityManager, Context,
+            [=](FMassExecutionContext& Context)
+            {
+                auto Transforms = Context.GetFragmentView<FTransformFragment>();
+                auto Velocities = Context.GetMutableFragmentView<FMassVelocityFragment>();
+
+                for (int32 i = 0; i < Context.GetNumEntities(); ++i)
+                {
+                    FVector MyPos = Transforms[i].Transform.GetLocation();
+                    FVector PushForce = FVector::ZeroVector;
+
+                    // 같은 청크 내 다른 몬스터와 분리
+                    for (int32 j = 0; j < Context.GetNumEntities(); ++j)
+                    {
+                        if (i == j) continue;
+
+                        FVector OtherPos = Transforms[j].Transform.GetLocation();
+                        FVector Diff = MyPos - OtherPos;
+                        float Dist = Diff.Size();
+
+                        if (Dist > 0 && Dist < SeparationRadius)
+                        {
+                            // 가까울수록 강하게 밀어냄
+                            float Strength = 1.0f - (Dist / SeparationRadius);
+                            PushForce += Diff.GetSafeNormal() * Strength * SeparationForce;
+                        }
+                    }
+
+                    // 분리력 적용
+                    Velocities[i].Value += PushForce;
                 }
             });
     }
@@ -732,28 +816,52 @@ class UMonsterBehaviorProcessor : public UMassProcessor
 
 ---
 
-## 8. 핵심 포인트 정리
+## 8. 흔한 문제와 해결책
 
-### 뱀파이어 서바이벌 스타일 권장 구조
+### 문제 1: "플레이어 위치를 매번 가져오면 느린가요?"
 
-1. **플레이어 추적**: 단순 방향 벡터 계산 (Processor)
-2. **공격**: 거리 체크 + 쿨다운 (Processor)
-3. **피격**: Signal로 데미지 이벤트 전파
-4. **죽음**: Signal + Tag 추가 + 지연 삭제
-5. **군집**: 분리력 계산 (선택적)
+**해결**: 캐싱!
 
-### Signal 활용
+```cpp
+// Processor 멤버 변수로 캐싱
+FVector CachedPlayerLocation;
+int32 CacheFrame = -1;
 
-- `MonsterHit`: 몬스터 피격 시
-- `MonsterDeath`: 몬스터 사망 시
-- `PlayerHit`: 플레이어 피격 시
-- `ItemDrop`: 아이템 드랍 시
+FVector GetPlayerLocation()
+{
+    int32 CurrentFrame = GFrameNumber;
+    if (CurrentFrame != CacheFrame)
+    {
+        // 프레임당 한 번만 업데이트
+        CacheFrame = CurrentFrame;
+        if (APawn* Player = UGameplayStatics::GetPlayerPawn(GetWorld(), 0))
+        {
+            CachedPlayerLocation = Player->GetActorLocation();
+        }
+    }
+    return CachedPlayerLocation;
+}
+```
 
-### StateTree는 선택적
+### 문제 2: "Signal이 안 와요"
 
-- High LOD Actor에서만 사용
-- 복잡한 패턴(보스 등)에 유용
-- 일반 잡몹은 Processor만으로 충분
+**체크리스트**:
+```
+□ Signal 이름이 정확히 일치하는가?
+□ SignalSubsystem을 올바르게 가져왔는가?
+□ Signal Processor가 SubscribeToSignal을 호출했는가?
+□ Entity Handle이 유효한가?
+```
+
+### 문제 3: "StateTree가 실행 안 돼요"
+
+**체크리스트**:
+```
+□ StateTreeAIComponent가 추가되어 있는가?
+□ StateTree 에셋이 설정되어 있는가?
+□ BeginPlay에서 StartLogic()을 호출했는가?
+□ Schema가 올바르게 설정되어 있는가?
+```
 
 ---
 
@@ -762,3 +870,12 @@ class UMonsterBehaviorProcessor : public UMassProcessor
 행동 로직 시스템을 이해했다면, 다음 문서에서 Ability System 통합을 살펴보겠습니다:
 
 - **다음**: [06_AbilitySystemIntegration.md](06_AbilitySystemIntegration.md) - GAS와 Mass AI 병행 사용 전략
+
+### 이 문서에서 배운 것
+
+1. **Processor 행동**: 간단한 추적/공격을 Processor로 구현
+2. **Signal 시스템**: 이벤트 기반 통신 (피격, 사망)
+3. **StateTree**: 복잡한 상태 기계 (High LOD용)
+4. **StateTree Task**: 블루프린트/C++로 커스텀 행동 정의
+5. **LOD별 전략**: 거리에 따라 행동 복잡도 조절
+6. **군집 분리**: 몬스터 겹침 방지
