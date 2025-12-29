@@ -10,3 +10,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.bak
+
+# Local-only files (not synced to wiki)
+_*.md
