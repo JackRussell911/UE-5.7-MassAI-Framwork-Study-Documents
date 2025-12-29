@@ -29,6 +29,7 @@
 |------|--------|------|--------|
 | 08 | [StateTreeGuide](08_StateTreeGuide.md) | StateTree 완전 가이드 (Mass 통합) | ★★★☆☆ |
 | 09 | [QuickStartTutorial](09_QuickStartTutorial.md) | 10분 만에 1000마리 스폰하기 | ★★☆☆☆ |
+| 10 | [InstancedSkeletalMeshAnalysis](10_InstancedSkeletalMeshAnalysis.md) | Instanced Skeletal Mesh + Mass AI 통합 분석 | ★★★★☆ |
 
 ---
 
@@ -216,6 +217,7 @@ C:\Program Files\Epic Games\UE_5.7.1\UE_5.7\Engine\Plugins\AI\MassAI\
 |------|------|----------|
 | v1.0 | 2025-12-29 | 초기 문서 작성 (01-07) |
 | v2.0 | 2025-12-29 | 구어체 스타일 업그레이드, 08-09 추가 |
+| v3.0 | 2025-12-29 | Instanced Skeletal Mesh 분석 문서 추가 (10) |
 
 ---
 
